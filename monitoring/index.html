@@ -1,0 +1,120 @@
+﻿<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>FI-APP-V3 Capital Analytics Dashboard</title>
+    <script src="https://tailwindcss.com"></script>
+</head>
+<body class="bg-slate-950 text-slate-100 font-sans min-h-screen antialiased">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-10">
+        
+        <!-- HEADER -->
+        <header class="flex flex-col md:flex-row md:items-center md:justify-between pb-8 border-b border-slate-800 gap-4">
+            <div>
+                <h1 class="text-3xl font-bold tracking-tight text-white">Options Portfolio Management</h1>
+                <p class="text-sm text-slate-400 mt-1">Real-time accounting ledger and mathematical probability scanner.</p>
+            </div>
+            <div class="flex items-center gap-4 bg-slate-900 border border-slate-800 p-3 rounded-xl">
+                <div class="h-2.5 w-2.5 rounded-full bg-emerald-500 animate-ping"></div>
+                <p class="text-xs font-medium text-slate-300">Simulation Engine: <span class="text-emerald-400 font-bold">FORWARD TEST ACTIVE</span></p>
+            </div>
+        </header>
+
+        <!-- PORTFOLIO CARDS -->
+        <section class="mt-10">
+            <h2 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">I. Capital Account Summary</h2>
+            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-5">
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p class="text-xs font-medium text-slate-400 uppercase">Net Portfolio Value</p>
+                    <p class="text-3xl font-bold text-indigo-400 mt-2">${{ "%.2f"|format(summary.total_equity) }}</p>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p class="text-xs font-medium text-slate-400 uppercase">Liquid Cash Balance</p>
+                    <p class="text-3xl font-bold text-emerald-400 mt-2">${{ "%.2f"|format(summary.current_cash_balance) }}</p>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p class="text-xs font-medium text-slate-400 uppercase">Locked Collateral</p>
+                    <p class="text-3xl font-bold text-amber-500 mt-2">${{ "%.2f"|format(summary.blocked_collateral) }}</p>
+                </div>
+                <div class="bg-slate-900 border border-slate-800 p-6 rounded-2xl">
+                    <p class="text-xs font-medium text-slate-400 uppercase">System Win Rate</p>
+                    <p class="text-3xl font-bold text-slate-100 mt-2">{{ win_rate }}%</p>
+                </div>
+            </div>
+        </section>
+
+        <!-- ACTIVE OPTIONS LIST -->
+        <section class="mt-12">
+            <h2 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">II. Active Credit Spread Inventory</h2>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                <table class="w-full text-left">
+                    <thead>
+                        <tr class="bg-slate-950 text-slate-400 text-xs font-semibold border-b border-slate-800">
+                            <th class="py-3 px-6">ID</th>
+                            <th class="py-3 px-6">Asset Ticker</th>
+                            <th class="py-3 px-6">Short Contract</th>
+                            <th class="py-3 px-6">Long Protection</th>
+                            <th class="py-3 px-6 text-right">Entry Premium</th>
+                            <th class="py-3 px-6 text-right">Margin Blocked</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800 text-sm">
+                        {% for pos in active_positions %}
+                        <tr class="hover:bg-slate-800/20">
+                            <td class="py-4 px-6 font-mono text-slate-500">#{{ pos.trade_id }}</td>
+                            <td class="py-4 px-6 font-bold text-white">{{ pos.symbol }}</td>
+                            <td class="py-4 px-6 text-emerald-400">Sell ${{ "%.2f"|format(pos.short_strike) }} Put</td>
+                            <td class="py-4 px-6 text-red-400">Buy ${{ "%.2f"|format(pos.long_strike) }} Put</td>
+                            <td class="py-4 px-6 text-right font-mono text-indigo-300">+${{ "%.2f"|format(pos.entry_credit_per_share * 100) }}</td>
+                            <td class="py-4 px-6 text-right font-mono text-amber-500">${{ "%.2f"|format(pos.collateral_locked) }}</td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="py-12 text-center text-slate-500 italic">No active contracts held in inventory.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+        <!-- PAST OPTIONS HISTORY -->
+        <section class="mt-12">
+            <h2 class="text-xs font-bold uppercase tracking-widest text-slate-400 mb-4">III. Historical Settlement Ledger</h2>
+            <div class="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden shadow-xl">
+                <table class="w-full text-left">
+                    <thead>
+                        <tr class="bg-slate-950 text-slate-400 text-xs font-semibold border-b border-slate-800">
+                            <th class="py-3 px-6">ID</th>
+                            <th class="py-3 px-6">Asset</th>
+                            <th class="py-3 px-6">Executed Structure Boundaries</th>
+                            <th class="py-3 px-6 text-right">Collected</th>
+                            <th class="py-3 px-6 text-right">Buyback Cost</th>
+                            <th class="py-3 px-6 text-right">Net Realized P&L</th>
+                        </tr>
+                    </thead>
+                    <tbody class="divide-y divide-slate-800 text-sm">
+                        {% for closed in closed_history %}
+                        <tr class="hover:bg-slate-800/20">
+                            <td class="py-4 px-6 font-mono text-slate-500">#{{ closed.trade_id }}</td>
+                            <td class="py-4 px-6 font-bold text-slate-300">{{ closed.symbol }}</td>
+                            <td class="py-4 px-6 text-slate-400 font-mono text-xs">Vertical Put Spread: ${{ closed.short_strike }} / ${{ closed.long_strike }}</td>
+                            <td class="py-4 px-6 text-right font-mono">${{ "%.2f"|format(closed.entry_credit_per_share * 100) }}</td>
+                            <td class="py-4 px-6 text-right font-mono">${{ "%.2f"|format(closed.exit_premium_price * 100) }}</td>
+                            <td class="py-4 px-6 text-right font-mono font-bold {% if closed.final_trade_pnl >= 0 %}text-emerald-400{% else %}text-red-400{% endif %}">
+                                ${{ "%+.2f"|format(closed.final_trade_pnl) }}
+                            </td>
+                        </tr>
+                        {% else %}
+                        <tr>
+                            <td colspan="6" class="py-12 text-center text-slate-500 italic">No historically finalized transactions processed yet.</td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+        </section>
+
+    </div>
+</body>
+</html>

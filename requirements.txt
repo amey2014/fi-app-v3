@@ -1,0 +1,6 @@
+alpaca-py>=0.33.0
+pandas>=2.3.3
+numpy>=1.26.4
+yfinance>=0.2.40
+scikit-learn>=1.5.0
+python-dotenv==1.0.0
