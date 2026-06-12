@@ -3,6 +3,8 @@ import os
 import time
 from pathlib import Path
 from datetime import datetime, timedelta, UTC
+import logging
+logger = logging.getLogger("OptionsTradingSystem")  # same logger as main.py
 
 # Windows Force-Pathing
 current_file = Path(__file__).resolve()
@@ -37,19 +39,19 @@ def manage_pre_market_sleep():
         ) - timedelta(minutes=config.AUTOMATED_WAKE_BUFFER_MINUTES)
 
         if now_est.weekday() >= 5:
-            print(f"--> Today is a weekend day. System sleeping for 6 hours before checking calendar...")
+            logger.info(f"[SCHEDULER] Weekend detected ({now_est.strftime('%A')}). Sleeping 6 hours.")
             time.sleep(21600)
             continue
 
         if now_est >= target_wake_time:
             market_close_time = now_est.replace(hour=16, minute=0, second=0)
             if now_est < market_close_time:
-                print(f"--> System booted during active pre-market/trading hours window ({now_est.strftime('%H:%M')} EST). Proceeding.")
+                logger.info(f"[SCHEDULER] System active during market hours ({now_est.strftime('%H:%M')} EST). Proceeding immediately.")
                 break
             else:
                 tomorrow_wake = target_wake_time + timedelta(days=1)
                 sleep_seconds = (tomorrow_wake - now_est).total_seconds()
-                print(f"--> Market is closed for the day. Sleeping for {sleep_seconds/3600:.2f} hours until tomorrow morning.")
+                logger.info(f"[SCHEDULER] Market closed for today. Sleeping {sleep_seconds/3600:.2f}h until tomorrow wake at {tomorrow_wake.strftime('%H:%M')} EST.")
                 time.sleep(sleep_seconds)
                 continue
 
@@ -61,27 +63,27 @@ def manage_pre_market_sleep():
         print("="*60 + "\n")
         
         time.sleep(sleep_seconds)
-        print("--> Standby completed! Awakening application layers for core execution loop.")
+        logger.info(f"Standby completed! Awakening application layers for core execution loop.")
         break
 
 def main():
     manage_pre_market_sleep()
 
-    print("=" * 60)
-    print(f"   EXECUTING PREMIUM-HARVESTING SYSTEM WORKFLOW: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    print("=" * 60)
+    logger.info("=" * 60)
+    logger.info(f"[RUN] DAILY WORKFLOW STARTED: {datetime.now().strftime('%Y-%m-%d %H:%M')} EST")
+    logger.info("=" * 60)
 
     orchestrator = TradingBotOrchestrator()
     portfolio_mgr = PortfolioUpdater()
 
-    print("\n[WORKFLOW STEP 1] Reviewing active positions for profit takes...")
+    logger.info("[WORKFLOW:1] Reviewing active positions for exit rules (50% profit / 21 DTE)...")
     portfolio_mgr.update_and_clean_portfolio()
 
-    print("\n[WORKFLOW STEP 2] Scanning live market for new 5-Filter setups...")
+    logger.info("[WORKFLOW:2] Scanning live market for new 5-filter spread setups...")
     orchestrator.run_daily_scan()
 
     print("\n" + "=" * 60)
-    print("   DAILY TRACKING CYCLE COMPLETED SUCCESSFULLY")
+    logger.info("[RUN] DAILY WORKFLOW COMPLETED")
     print("=" * 60)
 
 if __name__ == "__main__":

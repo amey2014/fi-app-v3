@@ -51,6 +51,19 @@ class TradingBotOrchestrator:
         self.alpaca_option_client = OptionHistoricalDataClient(api_key=config.ALPACA_API_KEY, secret_key=config.ALPACA_SECRET_KEY)
         self.alpaca_stock_client = StockHistoricalDataClient(api_key=config.ALPACA_API_KEY, secret_key=config.ALPACA_SECRET_KEY)
 
+        # ── AUDIT: log active config at startup so we know what parameters drove each run
+        logger.info("=" * 70)
+        logger.info("[STARTUP] fi-app-v3 Trading Bot Initialised")
+        logger.info(f"[STARTUP] SIMULATION_MODE     : {config.VIRTUAL_SIMULATION_MODE}")
+        logger.info(f"[STARTUP] VIRTUAL_CAPITAL      : ${config.VIRTUAL_STARTING_CAPITAL:,.2f}")
+        logger.info(f"[STARTUP] UNIVERSE size        : {len(config.UNIVERSE)} stocks")
+        logger.info(f"[STARTUP] MIN_IV_RANK          : {config.MIN_IV_RANK}")
+        logger.info(f"[STARTUP] TARGET_DELTA         : {config.TARGET_SHORT_DELTA}")
+        logger.info(f"[STARTUP] SPREAD_WIDTH         : ${config.SPREAD_WIDTH_POINTS}")
+        logger.info(f"[STARTUP] MAX_EARNINGS_DAYS    : {config.MAX_EARNINGS_LOOKAHEAD_DAYS}")
+        logger.info(f"[STARTUP] LOOKBACK_PERIOD      : {config.LOOKBACK_PERIOD} days")
+        logger.info("=" * 70)
+
     def fetch_live_alpaca_options(self, symbol: str, current_price: float) -> pd.DataFrame:
         """Queries live active option chains with strict date boundaries directly from Alpaca."""
         try:
@@ -76,19 +89,24 @@ class TradingBotOrchestrator:
                     ask = float(snapshot.latest_quote.ask_price) if snapshot.latest_quote and snapshot.latest_quote.ask_price else 0.0
                     try:
                         strike_val = float(contract_symbol[-8:]) / 1000.0
-                    except: continue
+                    except Exception as e:
+                        logger.debug(f"[PARSE:Strike] Failed to parse strike from symbol '{contract_symbol}' | error={e}")
+                        continue
+
                     if strike_val <= 0.0 or (bid == 0.0 and ask == 0.0): continue
 
                     live_delta = -0.25
                     try:
                         if snapshot.greeks and snapshot.greeks.delta is not None:
                             live_delta = float(snapshot.greeks.delta)
-                    except AttributeError: pass
+                    except AttributeError as e:
+                        logger.debug(f"[PARSE:Greeks] No delta available for {contract_symbol} | defaulting to -0.25 | reason={e}")
 
                     processed_rows.append({'symbol': contract_symbol, 'type': 'put', 'strike': strike_val, 'delta': live_delta, 'bid': bid, 'ask': ask, 'open_interest': 1000})
             return pd.DataFrame(processed_rows)
         except Exception as e:
-            logger.error(f"Options Pipeline Error for {symbol}: {e}")
+            logger.error(f"[API:OptionChain] {symbol} | FATAL pipeline error | {type(e).__name__}: {e}")
+            logger.debug(traceback.format_exc())
             return pd.DataFrame()
 
     def run_daily_scan(self):
@@ -114,6 +132,9 @@ class TradingBotOrchestrator:
             
             try:
                 logger.info(f"Downloading historical daily charts from Alpaca for underlying stock: {stock}")
+                # ── AUDIT: log exact parameters being sent to Alpaca so we can verify date range
+                logger.debug(f"[API:StockBars] {stock} | start={start_date.strftime('%Y-%m-%d')} end={end_date.strftime('%Y-%m-%d')} | timeframe=Day")
+
                 req = StockBarsRequest(symbol_or_symbols=stock, timeframe=TimeFrame.Day, start=start_date, end=end_date)
                 bars = self.alpaca_stock_client.get_stock_bars(req)
                 
@@ -124,7 +145,9 @@ class TradingBotOrchestrator:
                 # 💎 SDK NATIVE DICTIONARY PARSING: Extract values using native token keys
                 raw_bars_list = bars.data[stock]
                 close_prices = [float(bar.close) for bar in raw_bars_list]
-                
+                # ── AUDIT: confirm what Alpaca actually returned so we can spot stale/missing data
+                logger.debug(f"[API:StockBars] {stock} | bars_returned={len(close_prices)} | first_date={raw_bars_list[0].timestamp.date()} | last_date={raw_bars_list[-1].timestamp.date()} | latest_close=${close_prices[-1]:.2f}")
+
                 if len(close_prices) < config.LOOKBACK_PERIOD:
                     logger.warning(f"  ❌ Stock {stock} has insufficient trading data history rows.")
                     continue
@@ -137,11 +160,14 @@ class TradingBotOrchestrator:
                 vol_series = pd.Series(rolling_vol.values.flatten())
                 iv_metrics = self.iv_calc.calculate_metrics(vol_series)
                 iv_rank = iv_metrics["iv_rank"]
+                # ── AUDIT: log every calculated value so we can verify the maths are correct
+                logger.debug(f"[CALC:IV] {stock} | rolling_vol_current={vol_series.iloc[-1]:.2f}% | iv_52w_low={vol_series.min():.2f}% | iv_52w_high={vol_series.max():.2f}% | iv_rank={iv_rank:.2f}")
 
                 # Extract stable, non-NaN indicators natively from clean pandas series arrays
                 current_price = float(close_series.iloc[-1])
                 ma_50 = float(close_series.rolling(50).mean().iloc[-1])
                 ma_200 = float(close_series.rolling(200).mean().iloc[-1])
+                logger.debug(f"[CALC:MA] {stock} | price=${current_price:.2f} | ma50=${ma_50:.2f} | ma200=${ma_200:.2f} | above_ma50={current_price >= ma_50} | above_ma200={current_price >= ma_200}")
 
                 volatility_candidates.append({
                     "symbol": stock, "iv_rank": iv_rank, "current_price": current_price,
@@ -166,18 +192,30 @@ class TradingBotOrchestrator:
         for candidate in high_iv_feed:
             stock = candidate["symbol"]
             current_price = candidate["current_price"]
-            logger.info(f"Auditing mathematical rules parameters for options chain: {stock} {current_price}")
+            logger.info(f"[API:OptionChain] {stock} | Requesting PUT chain | expiry_gte={date.today() + timedelta(days=25)} expiry_lte={date.today() + timedelta(days=50)} | strike_range=${candidate['current_price']*0.70:.2f}–${candidate['current_price']*0.99:.2f}")
             real_chain = self.fetch_live_alpaca_options(stock, current_price)
-            if real_chain.empty: continue
+            # ── AUDIT: log what came back from options chain fetch
+            if real_chain.empty:
+                logger.warning(f"[API:OptionChain] {stock} | EMPTY response — no valid PUT contracts in 25–50 DTE window. Skipping.")
+                continue
+            else:
+                logger.debug(f"[API:OptionChain] {stock} | contracts_returned={len(real_chain)} | strike_range=${real_chain['strike'].min():.2f}–${real_chain['strike'].max():.2f} | delta_range={real_chain['delta'].min():.3f}–{real_chain['delta'].max():.3f}")
 
             spread_blueprint = self.spread_mgr.build_put_credit_spread(real_chain)
-            if spread_blueprint["status"] == "ERROR": continue
+            # ── AUDIT: log spread construction result so we know why a spread was accepted or rejected
+            if spread_blueprint["status"] == "ERROR":
+                logger.warning(f"[SPREAD:BUILD] {stock} | FAILED — {spread_blueprint.get('message', 'unknown error')}")
+                continue
+            else:
+                logger.debug(f"[SPREAD:BUILD] {stock} | short_strike=${spread_blueprint['short_leg']['strike']:.2f} | long_strike=${spread_blueprint['long_leg']['strike']:.2f} | short_delta={spread_blueprint['short_leg']['delta']:.3f} | net_credit=${spread_blueprint['metrics']['net_credit_per_contract']:.2f} | max_loss=${spread_blueprint['metrics'].get('max_loss_per_contract', 'N/A')}")
 
             try:
                 target_exp_date = date.today() + timedelta(days=38)
                 generated_broker_code = f"{stock.ljust(6)}{target_exp_date.strftime('%y%m%d')}P{int(spread_blueprint['short_leg']['strike'] * 1000):08d}".replace(" ", "")
-            except: continue
-
+                logger.debug(f"[CONTRACT:CODE] {stock} | generated_symbol={generated_broker_code} | target_expiry={target_exp_date}")
+            except Exception as e:
+                logger.error(f"[CONTRACT:CODE] {stock} | FAILED to generate broker symbol | error={e} | strike={spread_blueprint['short_leg']['strike']}")
+                continue
             scan_results.append({
                 "symbol": stock,
                 "metrics": {"iv_rank": candidate["iv_rank"], "current_price": candidate["current_price"], "ma_50": candidate["ma_50"], "ma_200": candidate["ma_200"], "days_to_earnings": candidate["days_to_earnings"], "options_liquid": True, "market_cap_b": candidate["market_cap_b"]},
@@ -192,10 +230,29 @@ class TradingBotOrchestrator:
         best_trade = self.selector.find_best_trade(scan_results)
         if isinstance(best_trade, dict) and best_trade.get("status") == "NO_TRADES_FOUND": return
 
-        # 💎 FIXED DICTIONARY RESPONSE POINTERS
-        logger.info(f"🎯 [DECISION RULE MATCHED] Allocation locked into: {best_trade['symbol']}")
-        logger.info(f"   Structure: Short ${best_trade['short_strike']} / Long ${best_trade['long_strike']} | Net Credit: +${best_trade['net_credit']:.2f}")
+        # ── AUDIT: full trade decision record — answers WHY this trade was selected
+        logger.info("=" * 70)
+        logger.info(f"[DECISION] TRADE SELECTED: {best_trade['symbol']}")
+        logger.info(f"[DECISION] Candidates evaluated : {len(scan_results)}")
+        logger.info(f"[DECISION] Composite score      : {best_trade.get('composite_score', 'N/A')}")
+        logger.info(f"[DECISION] IV Rank              : {best_trade.get('iv_rank', 'N/A'):.2f}")
+        logger.info(f"[DECISION] Stock price          : ${best_trade.get('current_price', 0):.2f}")
+        logger.info(f"[DECISION] MA50                 : ${best_trade.get('ma50', 0):.2f}")
+        logger.info(f"[DECISION] Above MA50           : {best_trade.get('current_price', 0) >= best_trade.get('ma50', 0)}")
+        logger.info(f"[DECISION] Days to earnings     : {best_trade.get('days_to_earnings', 'N/A')}")
+        logger.info(f"[DECISION] Short strike         : ${best_trade['short_strike']:.2f}")
+        logger.info(f"[DECISION] Long strike          : ${best_trade['long_strike']:.2f}")
+        logger.info(f"[DECISION] Short delta          : {best_trade.get('short_delta', 'N/A')}")
+        logger.info(f"[DECISION] Net credit           : ${best_trade['net_credit']:.2f} per contract (${best_trade['net_credit']*100:.2f} total)")
+        logger.info(f"[DECISION] Max loss             : ${(best_trade.get('spread_width', 5.0) - best_trade['net_credit'])*100:.2f} total")
+        logger.info(f"[DECISION] Expiry date          : {best_trade.get('expiry_date', 'N/A')}")
+        logger.info(f"[DECISION] Contract symbol      : {best_trade.get('short_leg_symbol', 'N/A')}")
+        logger.info(f"[DECISION] Return on risk       : {(best_trade['net_credit'] / (best_trade.get('spread_width', 5.0) - best_trade['net_credit']) * 100):.1f}%")
+        logger.info("=" * 70)
         self.order_mgr.execute_spread_order(best_trade)
+        # ── AUDIT: confirm execution completed and what was written to portfolio
+        logger.info(f"[EXECUTION] order_manager.execute_spread_order() returned for {best_trade['symbol']}")
+        logger.info(f"[EXECUTION] Check execution/virtual_portfolio.json to verify position was logged correctly")
 
 if __name__ == "__main__":
     bot = TradingBotOrchestrator()
