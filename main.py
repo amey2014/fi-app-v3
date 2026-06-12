@@ -51,15 +51,17 @@ class TradingBotOrchestrator:
         self.alpaca_option_client = OptionHistoricalDataClient(api_key=config.ALPACA_API_KEY, secret_key=config.ALPACA_SECRET_KEY)
         self.alpaca_stock_client = StockHistoricalDataClient(api_key=config.ALPACA_API_KEY, secret_key=config.ALPACA_SECRET_KEY)
 
-    def fetch_live_alpaca_options(self, symbol: str) -> pd.DataFrame:
+    def fetch_live_alpaca_options(self, symbol: str, current_price: float) -> pd.DataFrame:
         """Queries live active option chains with strict date boundaries directly from Alpaca."""
         try:
             today_dt = date.today()
             req = OptionChainRequest(
                 underlying_symbol=symbol,
                 type=ContractType.PUT,
-                expiration_date_start=today_dt + timedelta(days=25),
-                expiration_date_end=today_dt + timedelta(days=50)
+                expiration_date_gte=today_dt + timedelta(days=25),     # ← correct param name
+                expiration_date_lte=today_dt + timedelta(days=50),     # ← correct param name
+                strike_price_gte=round(current_price * 0.70, 2),                 # ← bonus: filter at API level
+                strike_price_lte=round(current_price * 0.99, 2)                  # ← only OTM puts
             )
             chain_data = self.alpaca_option_client.get_option_chain(req)
             if not chain_data: return pd.DataFrame()
@@ -163,8 +165,9 @@ class TradingBotOrchestrator:
         scan_results = []
         for candidate in high_iv_feed:
             stock = candidate["symbol"]
-            logger.info(f"Auditing mathematical rules parameters for options chain: {stock}")
-            real_chain = self.fetch_live_alpaca_options(stock)
+            current_price = candidate["current_price"]
+            logger.info(f"Auditing mathematical rules parameters for options chain: {stock} {current_price}")
+            real_chain = self.fetch_live_alpaca_options(stock, current_price)
             if real_chain.empty: continue
 
             spread_blueprint = self.spread_mgr.build_put_credit_spread(real_chain)

@@ -1,8 +1,10 @@
 import os
+from dotenv import load_dotenv
+load_dotenv()  # Load environment variables from .env file
 
 # Alpaca API Credentials (Update with your actual Paper API keys)
-ALPACA_API_KEY = os.getenv("ALPACA_API_KEY", "key")
-ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY", "secret")
+ALPACA_API_KEY = os.getenv("ALPACA_API_KEY")
+ALPACA_SECRET_KEY = os.getenv("ALPACA_SECRET_KEY")
 ALPACA_PAPER_MODE = True  
 
 # VIRTUAL SIMULATION SWITCH
