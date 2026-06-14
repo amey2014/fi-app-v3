@@ -19,72 +19,98 @@ class SpreadManager:
         if chain_df.empty:
             return {"status": "ERROR", "message": "Option chain data is empty."}
 
-        # 1. Isolate Put contracts and sort by strike price from lowest to highest
         puts = chain_df[chain_df['type'] == 'put'].copy()
         if puts.empty:
             return {"status": "ERROR", "message": "No put options available."}
-            
+
         puts = puts.sort_values(by='strike').reset_index(drop=True)
 
-        # 2. Select the Short Strike closest to your target Delta profile
-        # Use abs() to reliably evaluate negative Put delta values
-        puts['short_delta_diff'] = (puts['delta'].abs() - abs(config.TARGET_SHORT_DELTA)).abs()
-        sorted_by_delta = puts.sort_values(by='short_delta_diff')
-        
-        short_leg = sorted_by_delta.iloc[0]
-        short_strike = float(short_leg['strike'])
+        # ── Compute mid price for every contract (more realistic than bid/ask)
+        puts['mid'] = (puts['bid'] + puts['ask']) / 2
 
-        # 3. Locate the Protective Long Strike exactly $5.00 below the short strike
+        # ── Filter out contracts with no real market (bid AND ask both zero)
+        puts = puts[(puts['bid'] > 0) & (puts['ask'] > 0)]
+        if puts.empty:
+            return {"status": "ERROR", "message": "No contracts with valid bid/ask found."}
+
+        # ── Select short strike closest to TARGET_SHORT_DELTA (0.25)
+        puts['short_delta_diff'] = (puts['delta'].abs() - abs(config.TARGET_SHORT_DELTA)).abs()
+        short_leg    = puts.sort_values(by='short_delta_diff').iloc[0]
+        short_strike = float(short_leg['strike'])
+        short_mid    = float(short_leg['mid'])
+
+        # ── Sanity check: short strike must be below current price (OTM put)
+        # We don't have current_price here so we rely on the chain being pre-filtered
+        # but we can check delta — short leg delta should be between -0.05 and -0.45
+        if not (-0.45 <= float(short_leg['delta']) <= -0.05):
+            return {"status": "ERROR", "message": f"Short leg delta {short_leg['delta']:.3f} outside acceptable range (-0.45 to -0.05)"}
+
+        # ── Find long strike exactly SPREAD_WIDTH_POINTS below short strike
         target_long_strike = short_strike - config.SPREAD_WIDTH_POINTS
-        
-        # Filter for all available option strikes below your short leg
         valid_longs = puts[puts['strike'] < short_strike].copy()
+
         if valid_longs.empty:
             return {"status": "ERROR", "message": f"Could not find any strikes lower than short strike ${short_strike}"}
-            
-        # Target the contract closest to your $5 distance marker
+
         valid_longs['long_strike_diff'] = (valid_longs['strike'] - target_long_strike).abs()
-        long_leg = valid_longs.sort_values(by='long_strike_diff').iloc[0]
-        long_strike = float(long_leg['strike'])
+        long_leg     = valid_longs.sort_values(by='long_strike_diff').iloc[0]
+        long_strike  = float(long_leg['strike'])
+        long_mid     = float(long_leg['mid'])
 
-        # 4. Final Financial Accounting (Credit = Short Bid minus Long Ask)
-        net_credit = short_leg['bid'] - long_leg['ask']
-        actual_width = short_strike - long_strike
-        max_loss = actual_width - net_credit
+        # ── Net credit using mid prices (realistic simulation pricing)
+        net_credit  = round(short_mid - long_mid, 2)
+        actual_width = round(short_strike - long_strike, 2)
+        max_loss     = round(actual_width - net_credit, 2)
 
-        # If options data arrays return inverted or lag numbers, enforce a baseline yield protection floor
-        if net_credit <= 0.0:
-            # Revert to a tight fallback check to find any valid spread pairing that collects credit
-            for _, alt_long in valid_longs.sort_values(by='strike', ascending=False).iterrows():
-                test_credit = short_leg['bid'] - alt_long['ask']
-                if test_credit > 0.0:
-                    long_leg = alt_long
-                    long_strike = float(long_leg['strike'])
-                    net_credit = test_credit
-                    max_loss = (short_strike - long_strike) - net_credit
-                    break
+        # ── Hard guards — reject the trade if numbers are unrealistic
+        if net_credit <= 0:
+            return {"status": "ERROR", "message": f"Net credit ${net_credit:.2f} is zero or negative — spread not viable"}
+
+        if net_credit >= actual_width:
+            return {"status": "ERROR", "message": f"Net credit ${net_credit:.2f} >= spread width ${actual_width:.2f} — impossible pricing, data error"}
+
+        # Credit should not exceed 60% of spread width (market never prices it higher for OTM spreads)
+        if net_credit > (actual_width * 0.60):
+            return {"status": "ERROR", "message": f"Net credit ${net_credit:.2f} exceeds 60% of spread width ${actual_width:.2f} — likely bad data, rejecting"}
+
+        if max_loss <= 0:
+            return {"status": "ERROR", "message": f"Max loss ${max_loss:.2f} is zero or negative — data error"}
+
+        return_on_risk = round((net_credit / max_loss) * 100, 2)
+
+        # ── Reject if return on risk is unrealistically high (> 20% is suspicious for 0.25 delta)
+        if return_on_risk > 20.0:
+            return {"status": "ERROR", "message": f"Return on risk {return_on_risk:.1f}% is unrealistically high — likely bad bid/ask data, rejecting"}
 
         return {
             "status": "SUCCESS",
             "strategy": "PUT_CREDIT_SPREAD",
             "short_leg": {
-                "symbol": short_leg['symbol'],
-                "strike": short_strike,
-                "delta": float(short_leg['delta']),
-                "bid": float(short_leg['bid'])
+                "symbol":  short_leg.get('symbol', ''),
+                "strike":  short_strike,
+                "delta":   round(float(short_leg['delta']), 4),
+                "bid":     round(float(short_leg['bid']), 2),
+                "ask":     round(float(short_leg['ask']), 2),
+                "mid":     round(short_mid, 2),
+                "expiry":  short_leg.get('expiry', ''),
             },
             "long_leg": {
-                "symbol": long_leg['symbol'],
-                "strike": long_strike,
-                "delta": float(long_leg['delta']),
-                "ask": float(long_leg['ask'])
+                "symbol":  long_leg.get('symbol', ''),
+                "strike":  long_strike,
+                "delta":   round(float(long_leg['delta']), 4),
+                "bid":     round(float(long_leg['bid']), 2),
+                "ask":     round(float(long_leg['ask']), 2),
+                "mid":     round(long_mid, 2),
+                "expiry":  long_leg.get('expiry', ''),
             },
             "metrics": {
-                "net_credit_per_contract": round(float(net_credit), 2),
-                "total_cash_collected": round(float(net_credit * 100), 2),
-                "required_margin_collateral": round(float(actual_width * 100), 2),
-                "max_loss_per_spread": round(float(max_loss * 100), 2),
-                "probability_of_profit_est": round((1.0 - abs(short_leg['delta'])) * 100, 2)
+                "net_credit_per_contract":    round(net_credit, 2),
+                "total_cash_collected":       round(net_credit * 100, 2),
+                "spread_width":               actual_width,
+                "max_loss_per_spread":        round(max_loss * 100, 2),
+                "required_margin_collateral": round(max_loss * 100, 2),
+                "return_on_risk_pct":         return_on_risk,
+                "probability_of_profit_est":  round((1.0 - abs(float(short_leg['delta']))) * 100, 2),
             }
         }
 

@@ -55,7 +55,7 @@ class TradingBotOrchestrator:
         logger.info("=" * 70)
         logger.info("[STARTUP] fi-app-v3 Trading Bot Initialised")
         logger.info(f"[STARTUP] SIMULATION_MODE     : {config.VIRTUAL_SIMULATION_MODE}")
-        logger.info(f"[STARTUP] VIRTUAL_CAPITAL      : ${config.VIRTUAL_STARTING_CAPITAL:,.2f}")
+        logger.info(f"[STARTUP] VIRTUAL_CAPITAL      : ${config.VIRTUAL_STARTING_BALANCE:,.2f}")
         logger.info(f"[STARTUP] UNIVERSE size        : {len(config.UNIVERSE)} stocks")
         logger.info(f"[STARTUP] MIN_IV_RANK          : {config.MIN_IV_RANK}")
         logger.info(f"[STARTUP] TARGET_DELTA         : {config.TARGET_SHORT_DELTA}")
@@ -73,7 +73,7 @@ class TradingBotOrchestrator:
                 type=ContractType.PUT,
                 expiration_date_gte=today_dt + timedelta(days=25),     # ← correct param name
                 expiration_date_lte=today_dt + timedelta(days=50),     # ← correct param name
-                strike_price_gte=round(current_price * 0.70, 2),                 # ← bonus: filter at API level
+                strike_price_gte=round(current_price * 0.65, 2),                 # ← bonus: filter at API level
                 strike_price_lte=round(current_price * 0.99, 2)                  # ← only OTM puts
             )
             chain_data = self.alpaca_option_client.get_option_chain(req)
