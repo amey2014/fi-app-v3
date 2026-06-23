@@ -57,6 +57,9 @@ class SpreadManager:
         long_strike  = float(long_leg['strike'])
         long_mid     = float(long_leg['mid'])
 
+        if short_mid <= long_mid:
+            return {"status": "ERROR", "message": f"Crossed quotes — short_mid ${short_mid:.3f} <= long_mid ${long_mid:.3f}. Stale data, rejecting."}
+
         # ── Net credit using mid prices (realistic simulation pricing)
         net_credit  = round(short_mid - long_mid, 2)
         actual_width = round(short_strike - long_strike, 2)
@@ -78,9 +81,9 @@ class SpreadManager:
 
         return_on_risk = round((net_credit / max_loss) * 100, 2)
 
-        # ── Reject if return on risk is unrealistically high (> 20% is suspicious for 0.25 delta)
-        if return_on_risk > 20.0:
-            return {"status": "ERROR", "message": f"Return on risk {return_on_risk:.1f}% is unrealistically high — likely bad bid/ask data, rejecting"}
+        # ── Reject if return on risk is unrealistically high (> 40% is suspicious for 0.25 delta)
+        if return_on_risk > config.MAX_RETURN_ON_RISK_PCT:
+            return {"status": "ERROR", "message": f"Return on risk {return_on_risk:.1f}% exceeds max threshold {config.MAX_RETURN_ON_RISK_PCT}% — likely bad bid/ask data, rejecting"}
 
         return {
             "status": "SUCCESS",
