@@ -35,6 +35,7 @@ class OrderManager:
                     "total_max_loss_at_risk": 0.0,
                     "total_equity":           config.VIRTUAL_STARTING_BALANCE
                 },
+                "next_trade_id": 1,
                 "active_positions":      [],
                 "closed_trades_history": []
             }
@@ -111,12 +112,13 @@ class OrderManager:
         summary["blocked_collateral"]     = round(summary["blocked_collateral"] + max_loss_per_spread, 2)
         summary["total_max_loss_at_risk"] = round(summary.get("total_max_loss_at_risk", 0) + max_loss_per_spread, 2)
         # True equity = starting capital minus total max loss exposure across all open positions
-        summary["total_equity"]           = round(summary["starting_capital"] - summary["total_max_loss_at_risk"], 2)
+        summary["total_equity"] = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
 
         logger.debug(f"[ORDER_MGR] Updated account | cash=${summary['current_cash_balance']} | collateral=${summary['blocked_collateral']} | equity=${summary['total_equity']}")
 
         # ── Build complete position record
-        trade_id = len(ledger["closed_trades_history"]) + len(ledger["active_positions"]) + 1
+        trade_id = ledger.get("next_trade_id", 1)
+        ledger["next_trade_id"] = trade_id + 1
 
         new_position = {
             "trade_id":               trade_id,
@@ -166,6 +168,67 @@ class OrderManager:
             "margin_collateral_blocked": max_loss_per_spread
         }
 
+    def close_position(self, trade_id: int, exit_credit: float, reason: str = "MANUAL") -> dict:
+        """
+        Closes an open position, moves it to history, releases collateral, and logs P&L.
+        exit_credit: the current net spread price to buy back at (per share)
+        """
+        ledger  = self._load_ledger()
+        summary = ledger["account_summary"]
+
+        # Find the position
+        position = next((p for p in ledger["active_positions"] if p["trade_id"] == trade_id), None)
+        if not position:
+            logger.warning(f"[ORDER_MGR] close_position() — trade_id={trade_id} not found in active positions")
+            return {"status": "ERROR", "message": f"Trade ID {trade_id} not found."}
+
+        symbol              = position["symbol"]
+        entry_credit        = position["entry_credit_per_share"]
+        collateral          = position["collateral_locked"]
+        exit_cash_paid      = round(exit_credit * 100, 2)
+
+        # P&L: credit collected at entry minus cost to close
+        pnl_dollars         = round((entry_credit - exit_credit) * 100, 2)
+        pnl_pct             = round((pnl_dollars / collateral) * 100, 2)
+
+        # Release collateral, deduct buyback cost from cash
+        summary["current_cash_balance"]   = round(summary["current_cash_balance"] - exit_cash_paid, 2)
+        summary["blocked_collateral"]     = round(summary["blocked_collateral"] - collateral, 2)
+        summary["total_max_loss_at_risk"] = round(summary["total_max_loss_at_risk"] - collateral, 2)
+        summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
+
+        # Build closed trade record
+        closed_record = dict(position)
+        closed_record.update({
+            "status":           "CLOSED",
+            "exit_credit":      round(exit_credit, 4),
+            "exit_cash_paid":   exit_cash_paid,
+            "pnl_dollars":      pnl_dollars,
+            "pnl_pct":          pnl_pct,
+            "close_reason":     reason,
+            "close_date":       datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        })
+
+        # Move from active to closed
+        ledger["active_positions"]      = [p for p in ledger["active_positions"] if p["trade_id"] != trade_id]
+        ledger["closed_trades_history"].append(closed_record)
+
+        # Recalculate collateral from scratch to prevent drift
+        summary["total_max_loss_at_risk"] = round(sum(p["collateral_locked"] for p in ledger["active_positions"]), 2)
+        summary["blocked_collateral"]     = summary["total_max_loss_at_risk"]
+
+        self._save_ledger(ledger)
+
+        logger.info(f"[ORDER_MGR] ✅ POSITION CLOSED | trade_id={trade_id} | {symbol} | P&L=${pnl_dollars} ({pnl_pct}%) | reason={reason}")
+
+        return {
+            "status":       "CLOSED",
+            "trade_id":     trade_id,
+            "symbol":       symbol,
+            "pnl_dollars":  pnl_dollars,
+            "pnl_pct":      pnl_pct,
+            "close_reason": reason,
+        }
 
 if __name__ == "__main__":
     print("Testing Local Virtual Portfolio Simulation Engine...")

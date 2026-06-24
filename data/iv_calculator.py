@@ -3,6 +3,7 @@ import os
 from pathlib import Path
 import pandas as pd
 import numpy as np
+import config
 
 # Windows Force-Pathing
 current_file = Path(__file__).resolve()
@@ -12,7 +13,7 @@ if str(root_dir) not in sys.path:
 os.chdir(str(root_dir))
 
 class IVCalculator:
-    def __init__(self, lookback_period: int = 252):
+    def __init__(self, lookback_period: int = config.LOOKBACK_PERIOD):
         """
         Initializes the calculation engine.
         :param lookback_period: 252 trading days representing a standard market year.
