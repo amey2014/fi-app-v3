@@ -19,7 +19,7 @@ LOOKBACK_PERIOD = 252                 # Synchronized historical trading day coun
 MIN_IV_RANK = 50.0                 # Keep at 0.0 to guarantee a live entry test; change back to 50.0 later
 MAX_EARNINGS_LOOKAHEAD_DAYS = 45
 LIQUIDITY_MIN_OI = 500
-MAX_BID_ASK_SPREAD_PCT = 0.10     
+MAX_BID_ASK_SPREAD_PCT = 0.50    
 
 # Position Selection Parameters
 TARGET_SHORT_DELTA = 0.25         

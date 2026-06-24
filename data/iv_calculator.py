@@ -27,6 +27,9 @@ class IVCalculator:
 
         # Slice to ensure we look at exactly the trailing year
         window_data = historical_iv.tail(self.lookback)
+        if len(window_data) < self.lookback:
+            raise ValueError(f"Too many NaN values. Only {len(window_data)} clean bars.")
+            
         current_iv = window_data.iloc[-1]
 
         # Metric 1: IV Rank

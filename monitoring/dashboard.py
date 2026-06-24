@@ -3,7 +3,7 @@ import os
 import json
 import time
 import threading
-from datetime import datetime, timedelta, UTC
+from datetime import datetime, timedelta, date, UTC
 from pathlib import Path
 from flask import Flask, jsonify, request, render_template_string
 
@@ -116,6 +116,24 @@ HTML_TEMPLATE = """
 </html>
 """
 
+def get_mid(chain, symbol):
+    """Returns mid price for a contract symbol, or None if unavailable."""
+    if not chain or symbol not in chain:
+        logger.warning(f"[DASHBOARD:PRICE] {symbol} NOT FOUND in chain")
+        return None
+    snapshot = chain[symbol]
+    if not snapshot.latest_quote:
+        logger.warning(f"[DASHBOARD:PRICE] {symbol} | latest_quote is None")
+        return None
+    bid = float(snapshot.latest_quote.bid_price or 0)
+    ask = float(snapshot.latest_quote.ask_price or 0)
+    if bid <= 0 or ask <= 0:
+        logger.warning(f"[DASHBOARD:PRICE] {symbol} | bid/ask zero")
+        return None
+    mid = round((bid + ask) / 2, 2)
+    logger.debug(f"[DASHBOARD:PRICE] {symbol} | bid=${bid:.2f} | ask=${ask:.2f} | mid=${mid:.2f}")
+    return mid
+
 def sync_state_from_ledger():
     if not LEDGER_PATH.exists():
         logger.warning("[DASHBOARD:SYNC] virtual_portfolio.json not found — ledger missing")
@@ -143,7 +161,6 @@ def sync_state_from_ledger():
 
             logger.debug(f"[DASHBOARD:POSITION] Processing trade_id={pos.get('trade_id')} | symbol={underlying_ticker} | short={short_symbol} | long={long_symbol}")
 
-            from datetime import date, timedelta
             today_dt  = date.today()
             dte_start = today_dt + timedelta(days=1)
             dte_end   = today_dt + timedelta(days=60)
@@ -160,24 +177,6 @@ def sync_state_from_ledger():
 
             if not chain_data:
                 logger.warning(f"[DASHBOARD:API] {underlying_ticker} | EMPTY chain response")
-
-            def get_mid(chain, symbol):
-                """Returns mid price for a contract symbol, or None if unavailable."""
-                if not chain or symbol not in chain:
-                    logger.warning(f"[DASHBOARD:PRICE] {symbol} NOT FOUND in chain")
-                    return None
-                snapshot = chain[symbol]
-                if not snapshot.latest_quote:
-                    logger.warning(f"[DASHBOARD:PRICE] {symbol} | latest_quote is None")
-                    return None
-                bid = float(snapshot.latest_quote.bid_price or 0)
-                ask = float(snapshot.latest_quote.ask_price or 0)
-                if bid <= 0 or ask <= 0:
-                    logger.warning(f"[DASHBOARD:PRICE] {symbol} | bid/ask zero")
-                    return None
-                mid = round((bid + ask) / 2, 2)
-                logger.debug(f"[DASHBOARD:PRICE] {symbol} | bid=${bid:.2f} | ask=${ask:.2f} | mid=${mid:.2f}")
-                return mid
 
             short_mid = get_mid(chain_data, short_symbol)
             long_mid  = get_mid(chain_data, long_symbol)
@@ -215,7 +214,6 @@ def sync_state_from_ledger():
             pos["current_price"] = current_net_spread
             pos["pnl_usd"]       = pnl_usd
             pos["pnl_pct"]       = pnl_pct
-            logger.info(f"[DASHBOARD:PNL] trade_id={pos.get('trade_id')} | {underlying_ticker} | entry=${entry:.2f} | current=${live_price:.2f} | pnl=${pnl_usd:+.2f} | pnl_pct={pnl_pct:+.1f}% | price_is_live={live_price != entry}")
 
             # target_contract_key = pos.get("short_leg_symbol", pos.get("symbol", ""))
             # underlying_ticker = pos.get("symbol", "MSFT")
@@ -307,6 +305,7 @@ def reset_ledger_api():
         logger.warning("[DASHBOARD:RESET] Existing ledger deleted")
     blank = {
         "account_summary": {"starting_capital": 5000.0, "current_cash_balance": 5000.0, "blocked_collateral": 0.0, "total_equity": 5000.0},
+        "next_trade_id": 1,
         "active_positions": [],
         "closed_trades_history": []
     }
@@ -320,58 +319,81 @@ def exit_position():
     tid = request.json.get("trade_id")
     logger.warning(f"[DASHBOARD:EXIT] Manual force-close triggered for trade_id={tid}")
     try:
-        with open(LEDGER_PATH, 'r') as f:
-            ledger = json.load(f)
+        # Get current net spread price from last sync
+        position   = next((p for p in dashboard_state["positions"] if str(p.get("trade_id")) == str(tid)), None)
+        exit_credit = float(position.get("current_price", position.get("entry_credit_per_share", 0.0))) if position else 0.0
 
-        # Find the position
-        position = next((p for p in ledger.get("active_positions", []) if str(p.get("trade_id")) == str(tid)), None)
-
-        if not position:
-            logger.warning(f"[DASHBOARD:EXIT] trade_id={tid} not found")
-            return jsonify({"message": "Trade not found."}), 404
-
-        # Use current_price from last sync if available, else entry price
-        exit_credit    = position.get("current_price", position.get("entry_credit_per_share", 0.0))
-        collateral     = float(position.get("collateral_locked", 0.0))
-        entry_credit   = float(position.get("entry_credit_per_share", 0.0))
-        exit_cash_paid = round(exit_credit * 100, 2)
-        pnl_dollars    = round((entry_credit - exit_credit) * 100, 2)
-
-        # Update account summary
-        summary = ledger["account_summary"]
-        summary["current_cash_balance"]   = round(summary["current_cash_balance"] - exit_cash_paid, 2)
-        summary["blocked_collateral"]     = round(summary["blocked_collateral"] - collateral, 2)
-        summary["total_max_loss_at_risk"] = round(summary.get("total_max_loss_at_risk", collateral) - collateral, 2)
-        summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
-
-        # Move to closed history
-        closed_record = dict(position)
-        closed_record.update({
-            "status":         "CLOSED",
-            "exit_credit":    round(exit_credit, 4),
-            "exit_cash_paid": exit_cash_paid,
-            "pnl_dollars":    pnl_dollars,
-            "close_reason":   "MANUAL_FORCE_CLOSE",
-            "close_date":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        })
-
-        ledger["active_positions"]       = [p for p in ledger["active_positions"] if str(p.get("trade_id")) != str(tid)]
-        ledger["closed_trades_history"].append(closed_record)
-
-        # Recalculate collateral from scratch to prevent drift
-        summary["blocked_collateral"]     = round(sum(p["collateral_locked"] for p in ledger["active_positions"]), 2)
-        summary["total_max_loss_at_risk"] = summary["blocked_collateral"]
-        summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
-
-        with open(LEDGER_PATH, 'w') as f:
-            json.dump(ledger, f, indent=4)
-
-        logger.warning(f"[DASHBOARD:EXIT] trade_id={tid} closed | pnl=${pnl_dollars:+.2f} | collateral_released=${collateral:.2f}")
-        return jsonify({"message": "Closed manually.", "pnl": pnl_dollars})
+        from execution.order_manager import OrderManager
+        manager = OrderManager()
+        result  = manager.close_position(
+            trade_id=int(tid),
+            exit_credit=exit_credit,
+            reason="MANUAL_FORCE_CLOSE"
+        )
+        logger.warning(f"[DASHBOARD:EXIT] close_position() result: {result}")
+        return jsonify(result)
 
     except Exception as e:
-        logger.error(f"[DASHBOARD:EXIT] Failed to close trade_id={tid} | {type(e).__name__}: {e}")
+        logger.error(f"[DASHBOARD:EXIT] Failed | {type(e).__name__}: {e}")
         return jsonify({"message": f"Error: {e}"}), 500
+
+# @app.route("/exit", methods=["POST"])
+# def exit_position():
+#     tid = request.json.get("trade_id")
+#     logger.warning(f"[DASHBOARD:EXIT] Manual force-close triggered for trade_id={tid}")
+#     try:
+#         with open(LEDGER_PATH, 'r') as f:
+#             ledger = json.load(f)
+
+#         # Find the position
+#         position = next((p for p in ledger.get("active_positions", []) if str(p.get("trade_id")) == str(tid)), None)
+
+#         if not position:
+#             logger.warning(f"[DASHBOARD:EXIT] trade_id={tid} not found")
+#             return jsonify({"message": "Trade not found."}), 404
+
+#         # Use current_price from last sync if available, else entry price
+#         exit_credit    = position.get("current_price", position.get("entry_credit_per_share", 0.0))
+#         collateral     = float(position.get("collateral_locked", 0.0))
+#         entry_credit   = float(position.get("entry_credit_per_share", 0.0))
+#         exit_cash_paid = round(exit_credit * 100, 2)
+#         pnl_dollars    = round((entry_credit - exit_credit) * 100, 2)
+
+#         # Update account summary
+#         summary = ledger["account_summary"]
+#         summary["current_cash_balance"]   = round(summary["current_cash_balance"] - exit_cash_paid, 2)
+#         summary["blocked_collateral"]     = round(summary["blocked_collateral"] - collateral, 2)
+#         summary["total_max_loss_at_risk"] = round(summary.get("total_max_loss_at_risk", collateral) - collateral, 2)
+#         summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
+
+#         # Move to closed history
+#         closed_record = dict(position)
+#         closed_record.update({
+#             "status":         "CLOSED",
+#             "exit_credit":    round(exit_credit, 4),
+#             "exit_cash_paid": exit_cash_paid,
+#             "pnl_dollars":    pnl_dollars,
+#             "close_reason":   "MANUAL_FORCE_CLOSE",
+#             "close_date":     datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+#         })
+
+#         ledger["active_positions"]       = [p for p in ledger["active_positions"] if str(p.get("trade_id")) != str(tid)]
+#         ledger["closed_trades_history"].append(closed_record)
+
+#         # Recalculate collateral from scratch to prevent drift
+#         summary["blocked_collateral"]     = round(sum(p["collateral_locked"] for p in ledger["active_positions"]), 2)
+#         summary["total_max_loss_at_risk"] = summary["blocked_collateral"]
+#         summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
+
+#         with open(LEDGER_PATH, 'w') as f:
+#             json.dump(ledger, f, indent=4)
+
+#         logger.warning(f"[DASHBOARD:EXIT] trade_id={tid} closed | pnl=${pnl_dollars:+.2f} | collateral_released=${collateral:.2f}")
+#         return jsonify({"message": "Closed manually.", "pnl": pnl_dollars})
+
+#     except Exception as e:
+#         logger.error(f"[DASHBOARD:EXIT] Failed to close trade_id={tid} | {type(e).__name__}: {e}")
+#         return jsonify({"message": f"Error: {e}"}), 500
 
 # @app.route("/exit", methods=["POST"])
 # def exit_position():

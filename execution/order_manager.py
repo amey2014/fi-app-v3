@@ -193,8 +193,8 @@ class OrderManager:
 
         # Release collateral, deduct buyback cost from cash
         summary["current_cash_balance"]   = round(summary["current_cash_balance"] - exit_cash_paid, 2)
-        summary["blocked_collateral"]     = round(summary["blocked_collateral"] - collateral, 2)
-        summary["total_max_loss_at_risk"] = round(summary["total_max_loss_at_risk"] - collateral, 2)
+        # summary["blocked_collateral"]     = round(summary["blocked_collateral"] - collateral, 2)
+        # summary["total_max_loss_at_risk"] = round(summary["total_max_loss_at_risk"] - collateral, 2)
         summary["total_equity"]           = round(summary["current_cash_balance"] - summary["blocked_collateral"], 2)
 
         # Build closed trade record

@@ -33,7 +33,18 @@ class SpreadManager:
         if puts.empty:
             return {"status": "ERROR", "message": "No contracts with valid bid/ask found."}
 
-        # ── Select short strike closest to TARGET_SHORT_DELTA (0.25)
+        # ── Filter 2: minimum open interest
+        if 'open_interest' in puts.columns:
+            puts = puts[puts['open_interest'] >= config.LIQUIDITY_MIN_OI]
+            if puts.empty:
+                return {"status": "ERROR", "message": f"No contracts met minimum OI of {config.LIQUIDITY_MIN_OI}"}
+
+        # ── Filter 3: max bid-ask spread %
+        puts = puts[(puts['ask'] - puts['bid']) / puts['ask'] <= config.MAX_BID_ASK_SPREAD_PCT]
+        if puts.empty:
+            return {"status": "ERROR", "message": f"No contracts met max bid-ask spread of {config.MAX_BID_ASK_SPREAD_PCT * 100}%"}
+
+        # ── Select short leg closest to target delta
         puts['short_delta_diff'] = (puts['delta'].abs() - abs(config.TARGET_SHORT_DELTA)).abs()
         short_leg    = puts.sort_values(by='short_delta_diff').iloc[0]
         short_strike = float(short_leg['strike'])
@@ -45,27 +56,33 @@ class SpreadManager:
         if not (-0.45 <= float(short_leg['delta']) <= -0.05):
             return {"status": "ERROR", "message": f"Short leg delta {short_leg['delta']:.3f} outside acceptable range (-0.45 to -0.05)"}
 
-        # ── Find long strike exactly SPREAD_WIDTH_POINTS below short strike
-        target_long_strike = short_strike - config.SPREAD_WIDTH_POINTS
+        # ── Find valid long strikes below short strike, SAME expiry ✅
         valid_longs = puts[puts['strike'] < short_strike].copy()
-
         if valid_longs.empty:
             return {"status": "ERROR", "message": f"Could not find any strikes lower than short strike ${short_strike}"}
 
-        valid_longs['long_strike_diff'] = (valid_longs['strike'] - target_long_strike).abs()
-        long_leg     = valid_longs.sort_values(by='long_strike_diff').iloc[0]
-        long_strike  = float(long_leg['strike'])
-        long_mid     = float(long_leg['mid'])
+        # ── Same expiry filter BEFORE selecting long leg ✅
+        valid_longs = valid_longs[valid_longs['expiry'] == short_leg['expiry']]
+        if valid_longs.empty:
+            return {"status": "ERROR", "message": "No same-expiry strikes available for long leg"}
 
+        # ── Select long leg closest to target width
+        target_long_strike = short_strike - config.SPREAD_WIDTH_POINTS
+        valid_longs['long_strike_diff'] = (valid_longs['strike'] - target_long_strike).abs()
+        long_leg    = valid_longs.sort_values(by='long_strike_diff').iloc[0]
+        long_strike = float(long_leg['strike'])
+        long_mid    = float(long_leg['mid'])
+
+        # ── Crossed quotes check
         if short_mid <= long_mid:
             return {"status": "ERROR", "message": f"Crossed quotes — short_mid ${short_mid:.3f} <= long_mid ${long_mid:.3f}. Stale data, rejecting."}
 
-        # ── Net credit using mid prices (realistic simulation pricing)
-        net_credit  = round(short_mid - long_mid, 2)
+        # ── Calculate metrics
+        net_credit   = round(short_mid - long_mid, 2)
         actual_width = round(short_strike - long_strike, 2)
         max_loss     = round(actual_width - net_credit, 2)
 
-        # ── Hard guards — reject the trade if numbers are unrealistic
+        # ── Hard guards
         if net_credit <= 0:
             return {"status": "ERROR", "message": f"Net credit ${net_credit:.2f} is zero or negative — spread not viable"}
 
@@ -81,7 +98,10 @@ class SpreadManager:
 
         return_on_risk = round((net_credit / max_loss) * 100, 2)
 
-        # ── Reject if return on risk is unrealistically high (> 40% is suspicious for 0.25 delta)
+        # ── Return on risk checks ✅ — AFTER return_on_risk is calculated
+        if return_on_risk < config.MIN_RETURN_ON_RISK_PCT:
+            return {"status": "ERROR", "message": f"Return on risk {return_on_risk:.1f}% below minimum {config.MIN_RETURN_ON_RISK_PCT}%"}
+
         if return_on_risk > config.MAX_RETURN_ON_RISK_PCT:
             return {"status": "ERROR", "message": f"Return on risk {return_on_risk:.1f}% exceeds max threshold {config.MAX_RETURN_ON_RISK_PCT}% — likely bad bid/ask data, rejecting"}
 
@@ -89,22 +109,22 @@ class SpreadManager:
             "status": "SUCCESS",
             "strategy": "PUT_CREDIT_SPREAD",
             "short_leg": {
-                "symbol":  short_leg.get('symbol', ''),
-                "strike":  short_strike,
-                "delta":   round(float(short_leg['delta']), 4),
-                "bid":     round(float(short_leg['bid']), 2),
-                "ask":     round(float(short_leg['ask']), 2),
-                "mid":     round(short_mid, 2),
-                "expiry":  short_leg.get('expiry', ''),
+                "symbol": short_leg.get('symbol', ''),
+                "strike": short_strike,
+                "delta":  round(float(short_leg['delta']), 4),
+                "bid":    round(float(short_leg['bid']), 2),
+                "ask":    round(float(short_leg['ask']), 2),
+                "mid":    round(short_mid, 2),
+                "expiry": short_leg.get('expiry', ''),
             },
             "long_leg": {
-                "symbol":  long_leg.get('symbol', ''),
-                "strike":  long_strike,
-                "delta":   round(float(long_leg['delta']), 4),
-                "bid":     round(float(long_leg['bid']), 2),
-                "ask":     round(float(long_leg['ask']), 2),
-                "mid":     round(long_mid, 2),
-                "expiry":  long_leg.get('expiry', ''),
+                "symbol": long_leg.get('symbol', ''),
+                "strike": long_strike,
+                "delta":  round(float(long_leg['delta']), 4),
+                "bid":    round(float(long_leg['bid']), 2),
+                "ask":    round(float(long_leg['ask']), 2),
+                "mid":    round(long_mid, 2),
+                "expiry": long_leg.get('expiry', ''),
             },
             "metrics": {
                 "net_credit_per_contract":    round(net_credit, 2),

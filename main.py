@@ -144,7 +144,7 @@ class TradingBotOrchestrator:
                     "bid":     bid,
                     "ask":     ask,
                     "mid":     mid,
-                    "open_interest": 1000,   # OI not available from this endpoint
+                    "open_interest": 1000,   # ⚠ Placeholder — Alpaca snapshot endpoint doesn't return OI
                 })
 
             if not processed_rows:
@@ -160,6 +160,93 @@ class TradingBotOrchestrator:
             logger.debug(traceback.format_exc())
             return pd.DataFrame()
 
+    def check_exit_conditions(self):
+        """Check all open positions for profit target or DTE exit. Called every cycle."""
+        ledger_path = Path("execution/virtual_portfolio.json")
+        if not ledger_path.exists():
+            return
+
+        try:
+            with open(ledger_path, 'r') as f:
+                ledger = json.load(f)
+        except Exception as e:
+            logger.error(f"[EXIT_MONITOR] Failed to load ledger | {e}")
+            return
+
+        positions = ledger.get("active_positions", [])
+        if not positions:
+            return
+
+        logger.info(f"[EXIT_MONITOR] Checking {len(positions)} open position(s) for exit conditions...")
+
+        for position in positions:
+            trade_id      = position["trade_id"]
+            symbol        = position["symbol"]
+            expiry        = position["expiry_date"]
+            profit_target = float(position["profit_target"])   # price to buy back at
+            entry_credit  = float(position["entry_credit_per_share"])
+            short_symbol  = position.get("short_leg_symbol", "")
+            long_symbol   = position.get("long_leg_symbol", "")
+
+            # ── Check DTE
+            try:
+                days_to_expiry = (datetime.strptime(expiry, "%Y-%m-%d") - datetime.now()).days
+            except Exception:
+                days_to_expiry = 999
+
+            # ── Fetch current spread price
+            current_spread = None
+            try:
+                today_dt  = date.today()
+                req = OptionChainRequest(
+                    underlying_symbol=symbol,
+                    type=ContractType.PUT,
+                    expiration_date_gte=today_dt + timedelta(days=1),
+                    expiration_date_lte=today_dt + timedelta(days=60)
+                )
+                chain_data = self.alpaca_option_client.get_option_chain(req)
+
+                if chain_data:
+                    def get_mid(snap):
+                        if not snap or not snap.latest_quote:
+                            return None
+                        bid = float(snap.latest_quote.bid_price or 0)
+                        ask = float(snap.latest_quote.ask_price or 0)
+                        return round((bid + ask) / 2, 2) if bid > 0 and ask > 0 else None
+
+                    short_mid = get_mid(chain_data.get(short_symbol))
+                    long_mid  = get_mid(chain_data.get(long_symbol))
+
+                    if short_mid is not None and long_mid is not None:
+                        current_spread = round(short_mid - long_mid, 2)
+                        if current_spread < 0:
+                            current_spread = 0.0
+                        logger.info(f"[EXIT_MONITOR] {symbol} | short_mid=${short_mid:.2f} | long_mid=${long_mid:.2f} | net_spread=${current_spread:.2f} | profit_target=${profit_target:.2f} | DTE={days_to_expiry}")
+
+            except Exception as e:
+                logger.error(f"[EXIT_MONITOR] {symbol} | Failed to fetch live spread price | {e}")
+
+            # ── Exit Rule 1: Profit target hit
+            if current_spread is not None and current_spread <= profit_target:
+                logger.info(f"[EXIT_MONITOR] {symbol} | 🎯 PROFIT TARGET HIT | current=${current_spread:.2f} <= target=${profit_target:.2f}")
+                self.order_mgr.close_position(trade_id, exit_credit=current_spread, reason="PROFIT_TARGET")
+                continue
+
+            # ── Exit Rule 2: DTE threshold reached
+            if days_to_expiry <= config.DTE_EXIT_THRESHOLD:
+                exit_price = current_spread if current_spread is not None else entry_credit
+                logger.info(f"[EXIT_MONITOR] {symbol} | ⏰ DTE EXIT | {days_to_expiry} days <= threshold {config.DTE_EXIT_THRESHOLD}")
+                self.order_mgr.close_position(trade_id, exit_credit=exit_price, reason="DTE_EXIT")
+                continue
+
+            # ── Exit Rule 3: Expired
+            if days_to_expiry <= 0:
+                logger.info(f"[EXIT_MONITOR] {symbol} | 📅 EXPIRED | closing at $0 (worthless)")
+                self.order_mgr.close_position(trade_id, exit_credit=0.0, reason="EXPIRED_WORTHLESS")
+                continue
+
+            logger.info(f"[EXIT_MONITOR] {symbol} | Holding | DTE={days_to_expiry} | spread=${current_spread if current_spread else 'N/A'} | target=${profit_target:.2f}")
+            
     # ──────────────────────────────────────────────────────────────
     # DAILY SCAN
     # ──────────────────────────────────────────────────────────────
@@ -168,6 +255,9 @@ class TradingBotOrchestrator:
         logger.info("=" * 73)
         logger.info(f" RUNNING CONSOLIDATED ALPACA MARKET SCAN: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
         logger.info("=" * 73)
+
+        # ── Check exits FIRST before scanning for new trades
+        self.check_exit_conditions()    # ← ADD THIS LINE
 
         # ── Load already-owned symbols to skip re-entry
         ledger_path   = Path("execution/virtual_portfolio.json")
@@ -294,11 +384,14 @@ class TradingBotOrchestrator:
             logger.debug(f"[SPREAD:BUILD] {stock} | short_strike=${spread_blueprint['short_leg']['strike']:.2f} | long_strike=${spread_blueprint['long_leg']['strike']:.2f} | short_delta={spread_blueprint['short_leg']['delta']:.3f} | net_credit=${spread_blueprint['metrics']['net_credit_per_contract']:.2f} | max_loss=${spread_blueprint['metrics']['max_loss_per_spread']:.2f}")
 
             # ── Generate OCC contract code
+
+            # CORRECT ✅ — use actual expiry from the chain
+            expiry_date_str = spread_blueprint["short_leg"].get("expiry", "")
+
             try:
-                target_exp_date      = date.today() + timedelta(days=38)
-                short_leg_occ_symbol = f"{stock.ljust(6)}{target_exp_date.strftime('%y%m%d')}P{int(spread_blueprint['short_leg']['strike'] * 1000):08d}".replace(" ", "")
-                long_leg_occ_symbol  = f"{stock.ljust(6)}{target_exp_date.strftime('%y%m%d')}P{int(spread_blueprint['long_leg']['strike']  * 1000):08d}".replace(" ", "")
-                expiry_date_str      = spread_blueprint["short_leg"].get("expiry", target_exp_date.strftime("%Y-%m-%d"))
+                exp_dt = datetime.strptime(expiry_date_str, "%Y-%m-%d")
+                short_leg_occ_symbol = f"{stock.ljust(6)}{exp_dt.strftime('%y%m%d')}P{int(spread_blueprint['short_leg']['strike'] * 1000):08d}".replace(" ", "")
+                long_leg_occ_symbol  = f"{stock.ljust(6)}{exp_dt.strftime('%y%m%d')}P{int(spread_blueprint['long_leg']['strike']  * 1000):08d}".replace(" ", "")
                 logger.debug(f"[CONTRACT:CODE] {stock} | short={short_leg_occ_symbol} | long={long_leg_occ_symbol} | expiry={expiry_date_str}")
             except Exception as e:
                 logger.error(f"[CONTRACT:CODE] {stock} | Failed to generate OCC symbol | error={e}")
