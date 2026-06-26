@@ -22,14 +22,16 @@ class IVCalculator:
 
     def calculate_metrics(self, historical_iv: pd.Series) -> dict:
         """Computes current IV Rank and Percentile over the trailing lookback window."""
-        if len(historical_iv) < self.lookback:
-            raise ValueError(f"Insufficient historical bars. Found {len(historical_iv)}, required {self.lookback}")
+        MIN_REQUIRED = 150
+
+        if len(historical_iv) < MIN_REQUIRED:
+            raise ValueError(f"Insufficient data: {len(historical_iv)} bars < {MIN_REQUIRED} minimum")
 
         # Slice to ensure we look at exactly the trailing year
         window_data = historical_iv.tail(self.lookback)
         if len(window_data) < self.lookback:
             raise ValueError(f"Too many NaN values. Only {len(window_data)} clean bars.")
-            
+
         current_iv = window_data.iloc[-1]
 
         # Metric 1: IV Rank

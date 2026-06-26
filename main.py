@@ -232,14 +232,22 @@ class TradingBotOrchestrator:
                 self.order_mgr.close_position(trade_id, exit_credit=current_spread, reason="PROFIT_TARGET")
                 continue
 
-            # ── Exit Rule 2: DTE threshold reached
+            # ── Exit Rule 2: Stop loss hit  ← THIS IS THE NEW BLOCK
+            if current_spread is not None:
+                stop_loss_price = round(entry_credit * config.STOP_LOSS_MULTIPLIER, 4)
+                if current_spread >= stop_loss_price:
+                    logger.info(f"[EXIT_MONITOR] {symbol} | 🛑 STOP LOSS HIT | current=${current_spread:.2f} >= 2x entry ${stop_loss_price:.2f} | locking in loss")
+                    self.order_mgr.close_position(trade_id, exit_credit=current_spread, reason="STOP_LOSS")
+                    continue
+                    
+            # ── Exit Rule 3: DTE threshold reached
             if days_to_expiry <= config.DTE_EXIT_THRESHOLD:
                 exit_price = current_spread if current_spread is not None else entry_credit
                 logger.info(f"[EXIT_MONITOR] {symbol} | ⏰ DTE EXIT | {days_to_expiry} days <= threshold {config.DTE_EXIT_THRESHOLD}")
                 self.order_mgr.close_position(trade_id, exit_credit=exit_price, reason="DTE_EXIT")
                 continue
 
-            # ── Exit Rule 3: Expired
+            # ── Exit Rule 4: Expired
             if days_to_expiry <= 0:
                 logger.info(f"[EXIT_MONITOR] {symbol} | 📅 EXPIRED | closing at $0 (worthless)")
                 self.order_mgr.close_position(trade_id, exit_credit=0.0, reason="EXPIRED_WORTHLESS")
@@ -412,6 +420,8 @@ class TradingBotOrchestrator:
                 "expiry_date":        expiry_date_str,
                 "short_delta":        spread_blueprint["short_leg"]["delta"],
                 "net_credit":         spread_blueprint["metrics"]["net_credit_per_contract"],
+                "short_leg_mid":      spread_blueprint["short_leg"]["mid"],    # ← add
+                "long_leg_mid":       spread_blueprint["long_leg"]["mid"], 
                 "spread_width":       spread_blueprint["metrics"]["spread_width"],
                 "max_loss":           spread_blueprint["metrics"]["max_loss_per_spread"],
                 "return_on_risk_pct": spread_blueprint["metrics"]["return_on_risk_pct"],

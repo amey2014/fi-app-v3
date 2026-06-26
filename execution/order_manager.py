@@ -136,6 +136,8 @@ class OrderManager:
 
             # ── Entry metrics
             "entry_credit_per_share": net_credit,
+            "short_leg_entry_price":  float(trade_proposal.get("short_leg_mid", 0.0)),   # ← add
+            "long_leg_entry_price":   float(trade_proposal.get("long_leg_mid", 0.0)),    # ← add
             "entry_cash_collected":   cash_credit,
             "short_delta":            trade_proposal.get("short_delta", 0.0),
             "iv_rank_at_entry":       trade_proposal.get("iv_rank", 0.0),

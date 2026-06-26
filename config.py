@@ -13,7 +13,7 @@ VIRTUAL_STARTING_BALANCE = 5000.0
 
 # Watchlist Universe
 UNIVERSE = ["AAPL", "MSFT", "NVDA", "AMZN", "META", "GOOGL", "TSLA", "AMD", "BAC", "PFE"]
-LOOKBACK_PERIOD = 252                 # Synchronized historical trading day count floor
+LOOKBACK_PERIOD = 200                 # Synchronized historical trading day count floor
 
 # Colleague's Strategy Filters
 MIN_IV_RANK = 50.0                 # Keep at 0.0 to guarantee a live entry test; change back to 50.0 later
@@ -36,3 +36,5 @@ BACKGROUND_POLLING_INTERVAL_SEC = 900
 MAX_OPEN_SPREADS = 2
 PROFIT_TARGET_PCT = 0.50
 DTE_EXIT_THRESHOLD = 21
+
+STOP_LOSS_MULTIPLIER = 2.0
